@@ -121,7 +121,7 @@ def global_exception_hook(exc_type, exc_value, exc_tb) -> None:
     active_logger.critical("Unhandled exception:\n%s", tb_str)
 
     try:
-        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication, QMessageBox
 
         if QApplication.instance():
             log_dir = getattr(active_logger, "_reforge_log_dir", DEFAULT_LOG_DIR)
