@@ -1,51 +1,81 @@
-"""
-Archiver Plugin — 7z/zip/tar extraction + APK resource repackaging.
-Wraps the bundled 7z/ binaries via subprocess.
-Publishes: archive.extracted, archive.packed
-"""
-import subprocess, shutil
+"""Archive extraction, packing, and content listing."""
+from __future__ import annotations
+
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QLineEdit, QPlainTextEdit, QFileDialog, QGroupBox, QComboBox
-)
+
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QFont
-from core.plugin_manager import BasePlugin
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
 from core.event_bus import bus
 from core.logger import get_logger
+from core.plugin_manager import BasePlugin
 
 log = get_logger("plugin.archiver")
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 SEVENZ_DIR = ROOT_DIR / "7z"
 
-# Resolve 7z binary: bundled linux 7za > system p7zip > system 7z
+
 def _find_7z() -> str:
-    for candidate in [
+    candidates = [
         SEVENZ_DIR / "7za",
+        SEVENZ_DIR / "7z.exe",
         Path("/usr/bin/7za"),
         Path("/usr/bin/7z"),
-    ]:
+    ]
+    for candidate in candidates:
         if candidate.exists():
             return str(candidate)
-    found = shutil.which("7za") or shutil.which("7z")
-    return found or "7z"
+    return shutil.which("7za") or shutil.which("7z") or "7z"
+
 
 BIN_7Z = _find_7z()
+
+
+def _display_cmd(args: list[str]) -> str:
+    return shlex.join(args)
 
 
 class _Worker(QThread):
     line = pyqtSignal(str)
     done = pyqtSignal(int)
-    def __init__(self, cmd): super().__init__(); self.cmd = cmd
-    def run(self):
+
+    def __init__(self, args: list[str]):
+        super().__init__()
+        self.args = args
+
+    def run(self) -> None:
         try:
-            p = subprocess.Popen(self.cmd, shell=True, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True)
-            for ln in p.stdout: self.line.emit(ln.rstrip())
-            p.wait(); self.done.emit(p.returncode)
-        except Exception as e: self.line.emit(f"[ERR] {e}"); self.done.emit(1)
+            process = subprocess.Popen(
+                self.args,
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            assert process.stdout is not None
+            for line in process.stdout:
+                self.line.emit(line.rstrip())
+            process.wait()
+            self.done.emit(process.returncode)
+        except OSError as exc:
+            self.line.emit(f"[ERR] {exc}")
+            self.done.emit(1)
 
 
 class ArchiverWidget(QWidget):
@@ -53,140 +83,197 @@ class ArchiverWidget(QWidget):
         super().__init__()
         vbox = QVBoxLayout(self)
 
-        # 7z status
-        status_txt = f"7z binary: {BIN_7Z}" if Path(BIN_7Z).exists() or shutil.which(BIN_7Z) \
-                     else "⚠ 7z not found — install p7zip-full"
-        vbox.addWidget(QLabel(status_txt))
+        binary_available = Path(BIN_7Z).exists() or shutil.which(BIN_7Z)
+        status = f"7z binary: {BIN_7Z}" if binary_available else "7z not found"
+        vbox.addWidget(QLabel(status))
 
-        # ── Extract ────────────────────────────────────────────────
-        ex_grp = QGroupBox("Extract Archive")
-        ev = QVBoxLayout(ex_grp)
-        er1 = QHBoxLayout()
-        er1.addWidget(QLabel("Archive:"))
-        self.ex_src = QLineEdit(); self.ex_src.setPlaceholderText("path/to/file.zip")
-        er1.addWidget(self.ex_src)
-        b1 = QPushButton("…"); b1.setMaximumWidth(30)
-        b1.clicked.connect(lambda: self._pick(self.ex_src, "Archives (*.zip *.7z *.tar *.apk *.jar *.rar)"))
-        er1.addWidget(b1); ev.addLayout(er1)
+        extract_group = QGroupBox("Extract Archive")
+        extract_layout = QVBoxLayout(extract_group)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Archive:"))
+        self.ex_src = QLineEdit()
+        row.addWidget(self.ex_src)
+        browse = QPushButton("...")
+        browse.clicked.connect(
+            lambda: self._pick(
+                self.ex_src, "Archives (*.zip *.7z *.tar *.apk *.jar *.rar)"
+            )
+        )
+        row.addWidget(browse)
+        extract_layout.addLayout(row)
 
-        er2 = QHBoxLayout()
-        er2.addWidget(QLabel("Output dir:"))
-        self.ex_dst = QLineEdit(); self.ex_dst.setPlaceholderText("destination folder")
-        er2.addWidget(self.ex_dst)
-        b2 = QPushButton("…"); b2.setMaximumWidth(30)
-        b2.clicked.connect(lambda: self._pick_dir(self.ex_dst))
-        er2.addWidget(b2); ev.addLayout(er2)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Output dir:"))
+        self.ex_dst = QLineEdit()
+        row.addWidget(self.ex_dst)
+        browse = QPushButton("...")
+        browse.clicked.connect(lambda: self._pick_dir(self.ex_dst))
+        row.addWidget(browse)
+        extract_layout.addLayout(row)
 
-        ex_btn = QPushButton("📦 Extract"); ex_btn.clicked.connect(self.do_extract)
-        ev.addWidget(ex_btn)
-        vbox.addWidget(ex_grp)
+        extract_button = QPushButton("Extract")
+        extract_button.clicked.connect(self.do_extract)
+        extract_layout.addWidget(extract_button)
+        vbox.addWidget(extract_group)
 
-        # ── Pack ───────────────────────────────────────────────────
-        pk_grp = QGroupBox("Pack / Re-sign APK Resources")
-        pv = QVBoxLayout(pk_grp)
-        pr1 = QHBoxLayout()
-        pr1.addWidget(QLabel("Source dir:"))
-        self.pk_src = QLineEdit(); self.pk_src.setPlaceholderText("folder to compress")
-        pr1.addWidget(self.pk_src)
-        b3 = QPushButton("…"); b3.setMaximumWidth(30)
-        b3.clicked.connect(lambda: self._pick_dir(self.pk_src))
-        pr1.addWidget(b3); pv.addLayout(pr1)
+        pack_group = QGroupBox("Pack Archive")
+        pack_layout = QVBoxLayout(pack_group)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Source dir:"))
+        self.pk_src = QLineEdit()
+        row.addWidget(self.pk_src)
+        browse = QPushButton("...")
+        browse.clicked.connect(lambda: self._pick_dir(self.pk_src))
+        row.addWidget(browse)
+        pack_layout.addLayout(row)
 
-        pr2 = QHBoxLayout()
-        pr2.addWidget(QLabel("Output file:"))
-        self.pk_dst = QLineEdit(); self.pk_dst.setPlaceholderText("out.zip / out.apk")
-        pr2.addWidget(self.pk_dst); pv.addLayout(pr2)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Output file:"))
+        self.pk_dst = QLineEdit()
+        row.addWidget(self.pk_dst)
+        pack_layout.addLayout(row)
 
-        pr3 = QHBoxLayout()
-        pr3.addWidget(QLabel("Format:"))
-        self.fmt = QComboBox(); self.fmt.addItems(["zip", "7z", "tar"])
-        pr3.addWidget(self.fmt); pr3.addStretch()
-        pv.addLayout(pr3)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Format:"))
+        self.fmt = QComboBox()
+        self.fmt.addItems(["zip", "7z", "tar"])
+        row.addWidget(self.fmt)
+        row.addStretch()
+        pack_layout.addLayout(row)
 
-        pk_btn = QPushButton("🗜 Pack"); pk_btn.clicked.connect(self.do_pack)
-        pv.addWidget(pk_btn)
-        vbox.addWidget(pk_grp)
+        pack_button = QPushButton("Pack")
+        pack_button.clicked.connect(self.do_pack)
+        pack_layout.addWidget(pack_button)
+        vbox.addWidget(pack_group)
 
-        # ── List contents ──────────────────────────────────────────
-        ls_grp = QGroupBox("List Contents")
-        lv = QVBoxLayout(ls_grp)
-        lr = QHBoxLayout()
-        self.ls_path = QLineEdit(); self.ls_path.setPlaceholderText("archive to inspect")
-        lr.addWidget(self.ls_path)
-        b4 = QPushButton("…"); b4.setMaximumWidth(30)
-        b4.clicked.connect(lambda: self._pick(self.ls_path, "Archives (*.zip *.7z *.apk *.jar)"))
-        lr.addWidget(b4)
-        ls_btn = QPushButton("📋 List"); ls_btn.clicked.connect(self.do_list)
-        lr.addWidget(ls_btn)
-        lv.addLayout(lr); vbox.addWidget(ls_grp)
+        list_group = QGroupBox("List Contents")
+        list_layout = QHBoxLayout(list_group)
+        self.ls_path = QLineEdit()
+        list_layout.addWidget(self.ls_path)
+        browse = QPushButton("...")
+        browse.clicked.connect(
+            lambda: self._pick(self.ls_path, "Archives (*.zip *.7z *.apk *.jar)")
+        )
+        list_layout.addWidget(browse)
+        list_button = QPushButton("List")
+        list_button.clicked.connect(self.do_list)
+        list_layout.addWidget(list_button)
+        vbox.addWidget(list_group)
 
-        # Output
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setFont(QFont("Monospace", 9))
         vbox.addWidget(self.console)
 
-        clr = QPushButton("✖ Clear Output"); clr.clicked.connect(self.console.clear)
-        vbox.addWidget(clr)
+        clear_button = QPushButton("Clear Output")
+        clear_button.clicked.connect(self.console.clear)
+        vbox.addWidget(clear_button)
 
-        self._workers = []
+        self._workers: list[_Worker] = []
 
-    def _pick(self, target: QLineEdit, filt: str):
-        p, _ = QFileDialog.getOpenFileName(self, "Select", str(ROOT_DIR), filt)
-        if p: target.setText(p)
+    def _pick(self, target: QLineEdit, file_filter: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select", str(ROOT_DIR), file_filter
+        )
+        if path:
+            target.setText(path)
 
-    def _pick_dir(self, target: QLineEdit):
-        p = QFileDialog.getExistingDirectory(self, "Select folder", str(ROOT_DIR))
-        if p: target.setText(p)
+    def _pick_dir(self, target: QLineEdit) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Select folder", str(ROOT_DIR))
+        if path:
+            target.setText(path)
 
-    def _run(self, cmd: str, event_name: str, payload: dict):
-        self.console.appendPlainText(f"\n$ {cmd}")
-        log.info("[ARCHIVER] %s", cmd)
-        bus.emit(f"archive.start", {"cmd": cmd}, source="archiver")
-        w = _Worker(cmd)
-        w.line.connect(self.console.appendPlainText)
-        def _on_done(rc):
-            self.console.appendPlainText(f"[exit {rc}]")
-            bus.emit(event_name, {**payload, "rc": rc}, source="archiver")
-        w.done.connect(_on_done)
-        self._workers.append(w); w.start()
+    def _run(self, args: list[str], event_name: str, payload: dict) -> None:
+        display = _display_cmd(args)
+        self.console.appendPlainText(f"\n$ {display}")
+        log.info("[ARCHIVER] %s", display)
+        bus.emit("archive.start", {"cmd": display}, source="archiver")
 
-    def do_extract(self):
-        src = self.ex_src.text().strip()
-        dst = self.ex_dst.text().strip()
-        if not src:
-            self.console.appendPlainText("[!] No archive selected"); return
-        out_arg = f'-o"{dst}"' if dst else f'-o"{Path(src).parent / (Path(src).stem + "_extracted")}"'
-        cmd = f'"{BIN_7Z}" x "{src}" {out_arg} -y'
-        self._run(cmd, "archive.extracted", {"src": src})
+        worker = _Worker(args)
+        worker.line.connect(self.console.appendPlainText)
 
-    def do_pack(self):
-        src = self.pk_src.text().strip()
-        dst = self.pk_dst.text().strip()
-        if not src or not dst:
-            self.console.appendPlainText("[!] Source and output required"); return
+        def on_done(return_code: int) -> None:
+            self.console.appendPlainText(f"[exit {return_code}]")
+            bus.emit(
+                event_name,
+                {**payload, "rc": return_code},
+                source="archiver",
+            )
+            try:
+                self._workers.remove(worker)
+            except ValueError:
+                pass
+            worker.deleteLater()
+
+        worker.done.connect(on_done)
+        self._workers.append(worker)
+        worker.start()
+
+    def do_extract(self) -> None:
+        source = Path(self.ex_src.text().strip()).expanduser()
+        if not source.is_file():
+            self.console.appendPlainText("[!] Select an existing archive")
+            return
+
+        requested = self.ex_dst.text().strip()
+        destination = (
+            Path(requested).expanduser()
+            if requested
+            else source.parent / f"{source.stem}_extracted"
+        )
+        args = [BIN_7Z, "x", str(source), f"-o{destination}", "-y"]
+        self._run(
+            args,
+            "archive.extracted",
+            {"src": str(source), "dst": str(destination)},
+        )
+
+    def do_pack(self) -> None:
+        source = Path(self.pk_src.text().strip()).expanduser()
+        destination_text = self.pk_dst.text().strip()
+        if not source.is_dir() or not destination_text:
+            self.console.appendPlainText(
+                "[!] Existing source directory and output are required"
+            )
+            return
+
+        destination = Path(destination_text).expanduser()
         fmt = self.fmt.currentText()
-        cmd = f'"{BIN_7Z}" a -t{fmt} "{dst}" "{src}/*" -y'
-        self._run(cmd, "archive.packed", {"src": src, "dst": dst})
+        args = [
+            BIN_7Z,
+            "a",
+            f"-t{fmt}",
+            str(destination),
+            str(source / "*"),
+            "-y",
+        ]
+        self._run(
+            args,
+            "archive.packed",
+            {"src": str(source), "dst": str(destination)},
+        )
 
-    def do_list(self):
-        p = self.ls_path.text().strip()
-        if not p:
-            self.console.appendPlainText("[!] No archive selected"); return
-        self._run(f'"{BIN_7Z}" l "{p}"', "archive.listed", {"path": p})
+    def do_list(self) -> None:
+        path = Path(self.ls_path.text().strip()).expanduser()
+        if not path.is_file():
+            self.console.appendPlainText("[!] Select an existing archive")
+            return
+        self._run([BIN_7Z, "l", str(path)], "archive.listed", {"path": str(path)})
 
 
 class ArchiverPlugin(BasePlugin):
     def __init__(self):
         super().__init__()
-        self.name        = "Archiver"
-        self.description = "7z/zip archive extraction, packing, and APK resource inspection."
-        self.widget      = None
+        self.name = "Archiver"
+        self.description = "Archive extraction, packing, and inspection."
+        self.widget = None
 
-    def initialize(self, main_window):
+    def initialize(self, main_window) -> None:
         self.widget = ArchiverWidget()
         main_window.add_plugin_dock("Archiver", self.widget)
-        log.info("Archiver plugin attached to GUI")
 
-    def shutdown(self):
+    def shutdown(self) -> None:
+        if self.widget:
+            for worker in list(self.widget._workers):
+                worker.requestInterruption()
         self.widget = None

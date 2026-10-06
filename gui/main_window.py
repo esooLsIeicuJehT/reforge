@@ -1,15 +1,13 @@
-"""
-ReForge Main Window — full dock layout with menu integration.
-"""
+"""ReForge main application window."""
+from __future__ import annotations
+
 import logging
 
-from PyQt6.QtWidgets import (
-    QMainWindow, QDockWidget, QTextEdit, QMenu,
-    QStatusBar, QLabel
-)
-from PyQt6.QtGui import QAction
-from PyQt6.QtCore import Qt, QObject, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QByteArray, QObject, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QCloseEvent, QFont
+from PyQt6.QtWidgets import QDockWidget, QLabel, QMainWindow, QStatusBar, QTextEdit
+
+from core.config_manager import ConfigManager
 from core.event_bus import bus
 from core.logger import get_logger
 
@@ -26,33 +24,37 @@ class _GuiLogHandler(logging.Handler):
         self._emitter = _LogEmitter()
         self._emitter.message.connect(target.append)
 
-    def emit(self, record: logging.LogRecord):
-        self._emitter.message.emit(self.format(record))
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._emitter.message.emit(self.format(record))
+        except RuntimeError:
+            return
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, config: ConfigManager | None = None):
         super().__init__()
-        self.setWindowTitle("ReForge  ░  Modular RE Toolkit")
+        self._config = config
+
+        self.setWindowTitle("ReForge • Modular RE Toolkit")
         self.resize(1440, 900)
         self.setDockOptions(
-            QMainWindow.DockOption.AllowTabbedDocks |
-            QMainWindow.DockOption.AnimatedDocks
+            QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.AnimatedDocks
         )
+        self._restore_geometry()
 
-        # Central welcome area
         self.central_text = QTextEdit()
         self.central_text.setReadOnly(True)
         self.central_text.setFont(QFont("Monospace", 10))
         self.central_text.setHtml(
-            "<h2 style='color:#82aaff'>ReForge — Modular Reverse Engineering Framework</h2>"
-            "<p style='color:#c3e88d'>Plugins are loading into the dock panels…</p>"
-            "<p style='color:#546e7a'>Use the <b>Plugins</b> menu to show/hide panels.</p>"
+            "<h2 style='color:#82aaff'>ReForge</h2>"
+            "<p style='color:#c3e88d'>Modular reverse-engineering workspace.</p>"
+            "<p style='color:#546e7a'>Use the <b>Plugins</b> menu to show or hide panels.</p>"
         )
         self.setCentralWidget(self.central_text)
 
-        # Bottom log dock
-        self.log_dock   = QDockWidget("System Logs", self)
+        self.log_dock = QDockWidget("System Logs", self)
         self.log_widget = QTextEdit()
         self.log_widget.setReadOnly(True)
         self.log_widget.setFont(QFont("Monospace", 8))
@@ -60,56 +62,55 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self._install_log_handler()
 
-        # Status bar
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._device_label = QLabel("No device")
         self._status.addPermanentWidget(self._device_label)
 
-        # Menu bar
-        mb = self.menuBar()
-        self.plugins_menu = mb.addMenu("Plugins")
-        view_menu = mb.addMenu("View")
+        menu_bar = self.menuBar()
+        self.plugins_menu = menu_bar.addMenu("Plugins")
+        view_menu = menu_bar.addMenu("View")
         log_action = QAction("System Logs", self, checkable=True, checked=True)
         log_action.toggled.connect(self.log_dock.setVisible)
         view_menu.addAction(log_action)
 
         self._docks: dict[str, QDockWidget] = {}
 
-        # Subscribe to device events for status bar
-        bus.subscribe("device.connected",    self._on_device_connected)
+        bus.subscribe("device.connected", self._on_device_connected)
         bus.subscribe("device.disconnected", self._on_device_disconnected)
-        bus.subscribe("loader.complete",     self._on_loader_complete)
+        bus.subscribe("loader.complete", self._on_loader_complete)
         log.info("[GUI] main window initialized")
 
-    # ── Public API used by plugins ────────────────────────────────────
-    def add_plugin_dock(self, title: str, widget,
-                        area=Qt.DockWidgetArea.RightDockWidgetArea) -> QDockWidget:
+    def add_plugin_dock(
+        self,
+        title: str,
+        widget,
+        area=Qt.DockWidgetArea.RightDockWidgetArea,
+    ) -> QDockWidget:
         dock = QDockWidget(title, self)
         dock.setObjectName(f"dock_{title.replace(' ', '_')}")
         dock.setWidget(widget)
         self.addDockWidget(area, dock)
 
-        # Tabify with existing docks in the same area
-        same_area = [d for d in self._docks.values()
-                     if self.dockWidgetArea(d) == area]
+        same_area = [
+            existing
+            for existing in self._docks.values()
+            if self.dockWidgetArea(existing) == area
+        ]
         if same_area:
             self.tabifyDockWidget(same_area[-1], dock)
 
         self._docks[title] = dock
-
-        # Add toggle action to Plugins menu
         action = dock.toggleViewAction()
         action.setText(title)
         self.plugins_menu.addAction(action)
-
-        log.info("[GUI] dock added: %s  area=%s", title, area)
+        log.info("[GUI] dock added: %s area=%s", title, area)
         return dock
 
-    def log(self, message: str):
+    def log(self, message: str) -> None:
         self.log_widget.append(message)
 
-    def _install_log_handler(self):
+    def _install_log_handler(self) -> None:
         formatter = logging.Formatter(
             "%(asctime)s %(levelname)-8s %(name)-35s %(message)s",
             datefmt="%H:%M:%S",
@@ -119,19 +120,48 @@ class MainWindow(QMainWindow):
         logging.getLogger("reforge").addHandler(handler)
         self._gui_log_handler = handler
 
-    # ── Bus handlers ─────────────────────────────────────────────────
-    def _on_device_connected(self, event):
+    def _restore_geometry(self) -> None:
+        if self._config is None:
+            return
+        value = self._config.config.get("window_geometry")
+        if not isinstance(value, str) or not value:
+            return
+        try:
+            self.restoreGeometry(QByteArray.fromHex(value.encode("ascii")))
+        except (ValueError, TypeError):
+            log.warning("Ignoring invalid saved window geometry")
+
+    def _persist_geometry(self) -> None:
+        if self._config is not None:
+            self._config.config["window_geometry"] = bytes(
+                self.saveGeometry().toHex()
+            ).decode("ascii")
+
+    def _on_device_connected(self, event) -> None:
         serial = event.payload.get("serial", "?")
         self._device_label.setText(f"Device: {serial}")
         self.statusBar().showMessage(f"Device connected: {serial}", 4000)
-        log.info("[GUI] device connected status updated: %s", serial)
 
-    def _on_device_disconnected(self, event):
+    def _on_device_disconnected(self, event) -> None:
         self._device_label.setText("No device")
         self.statusBar().showMessage("Device disconnected", 3000)
-        log.info("[GUI] device disconnected status updated")
 
-    def _on_loader_complete(self, event):
+    def _on_loader_complete(self, event) -> None:
         count = event.payload.get("count", 0)
-        self.statusBar().showMessage(f"✔  {count} plugin(s) loaded", 5000)
-        log.info("[GUI] loader complete: %d plugin(s)", count)
+        failed = event.payload.get("failed", 0)
+        message = f"{count} plugin(s) loaded"
+        if failed:
+            message += f", {failed} failed"
+        self.statusBar().showMessage(message, 5000)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._persist_geometry()
+        bus.unsubscribe("device.connected", self._on_device_connected)
+        bus.unsubscribe("device.disconnected", self._on_device_disconnected)
+        bus.unsubscribe("loader.complete", self._on_loader_complete)
+
+        root_logger = logging.getLogger("reforge")
+        root_logger.removeHandler(self._gui_log_handler)
+        self._gui_log_handler.close()
+
+        super().closeEvent(event)
