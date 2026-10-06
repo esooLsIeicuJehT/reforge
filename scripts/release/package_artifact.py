@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import importlib.metadata as metadata
+import json
 import os
 import platform
 import shutil
@@ -38,12 +39,30 @@ def _find_deployed_output() -> Path:
     return sorted(candidates)[0]
 
 
-def _copy_legal_material(stage: Path) -> None:
+def _copy_release_material(stage: Path) -> None:
     for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
         source = ROOT / name
         if not source.exists():
             raise RuntimeError(f"Required legal file missing: {name}")
         shutil.copy2(source, stage / name)
+
+    checklist = ROOT / "docs" / "RELEASE_CHECKLIST.md"
+    if not checklist.exists():
+        raise RuntimeError("Required release checklist is missing")
+    shutil.copy2(checklist, stage / "RELEASE_CHECKLIST.md")
+
+    build_metadata = ROOT / "build" / "release-build.json"
+    if not build_metadata.exists():
+        raise RuntimeError("Native build metadata is missing")
+    payload = json.loads(build_metadata.read_text(encoding="utf-8"))
+    payload["packaged_platform"] = platform.platform()
+    payload["packaged_machine"] = platform.machine()
+    payload["github_run_id"] = os.getenv("GITHUB_RUN_ID", "")
+    payload["github_run_attempt"] = os.getenv("GITHUB_RUN_ATTEMPT", "")
+    (stage / "BUILD-INFO.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     license_root = stage / "licenses" / "qt-for-python"
     copied = 0
@@ -128,7 +147,14 @@ def _zip_stage(stage: Path, archive: Path, epoch: int) -> None:
     import datetime
 
     timestamp = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
-    date_time = (timestamp.year, timestamp.month, timestamp.day, timestamp.hour, timestamp.minute, timestamp.second)
+    date_time = (
+        timestamp.year,
+        timestamp.month,
+        timestamp.day,
+        timestamp.hour,
+        timestamp.minute,
+        timestamp.second,
+    )
 
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         for path in sorted(stage.rglob("*")):
@@ -142,13 +168,19 @@ def _zip_stage(stage: Path, archive: Path, epoch: int) -> None:
                 info.external_attr = (stat.S_IFLNK | mode) << 16
                 zf.writestr(info, os.readlink(path).encode("utf-8"))
             else:
-                zf.writestr(info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+                zf.writestr(
+                    info,
+                    path.read_bytes(),
+                    compress_type=zipfile.ZIP_DEFLATED,
+                    compresslevel=9,
+                )
 
 
 def _tar_stage(stage: Path, archive: Path, epoch: int) -> None:
     with archive.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=epoch, compresslevel=9) as gz:
             with tarfile.open(fileobj=gz, mode="w", dereference=False) as tf:
+
                 def normalize(info: tarfile.TarInfo) -> tarfile.TarInfo:
                     info.uid = 0
                     info.gid = 0
@@ -178,7 +210,7 @@ def main() -> int:
     else:
         shutil.copy2(source, destination)
 
-    _copy_legal_material(stage)
+    _copy_release_material(stage)
     _write_dependency_metadata(stage)
     _write_checksums(stage)
 
