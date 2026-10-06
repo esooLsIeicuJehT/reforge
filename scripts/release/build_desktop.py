@@ -34,20 +34,27 @@ def _configure_spec(spec_path: Path) -> None:
     parser["app"]["project_file"] = str(ROOT / "pyproject.toml")
     parser["app"]["exec_directory"] = str(BUILD_ROOT)
 
+    deploy_packages = ["nuitka==4.1.1", "ordered_set", "zstandard"]
+    if sys.platform.startswith("linux"):
+        deploy_packages.append("patchelf")
     parser["python"]["python_path"] = sys.executable
+    parser["python"]["packages"] = ",".join(deploy_packages)
+
     parser["qt"]["modules"] = "Core,Gui,Widgets"
 
+    extra_args = [
+        "--quiet",
+        "--noinclude-qt-translations=True",
+        "--include-package=plugins",
+        "--include-package=core",
+        "--include-package=gui",
+        "--include-data-files=gui/dark_theme.qss=gui/dark_theme.qss",
+    ]
+    if sys.platform == "darwin":
+        extra_args.append("--macos-create-app-bundle")
+
     parser["nuitka"]["mode"] = "standalone"
-    parser["nuitka"]["extra_args"] = " ".join(
-        [
-            "--quiet",
-            "--noinclude-qt-translations=True",
-            "--include-package=plugins",
-            "--include-package=core",
-            "--include-package=gui",
-            "--include-data-files=gui/dark_theme.qss=gui/dark_theme.qss",
-        ]
-    )
+    parser["nuitka"]["extra_args"] = " ".join(extra_args)
 
     WORK_SPEC.parent.mkdir(parents=True, exist_ok=True)
     with WORK_SPEC.open("w", encoding="utf-8") as handle:
@@ -101,6 +108,8 @@ def main() -> int:
     metadata = {
         "platform": sys.platform,
         "python": sys.version,
+        "pyside": "6.11.2",
+        "nuitka": "4.1.1",
         "outputs": outputs,
         "source_date_epoch": os.getenv("SOURCE_DATE_EPOCH", ""),
     }
