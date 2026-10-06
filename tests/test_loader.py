@@ -70,6 +70,29 @@ def test_successful_plugin_is_recorded_after_activation(monkeypatch):
     assert loader.plugins == [loader.records[0].instance]
 
 
+def test_initialize_failure_cleans_up_once_and_disables_record():
+    state = {"cleanup": 0}
+
+    class InitFailPlugin(BasePlugin):
+        def initialize(self, _main_window):
+            raise RuntimeError("init exploded")
+
+        def shutdown(self):
+            state["cleanup"] += 1
+
+    loader = Loader()
+    record = PluginRecord("init-fail", InitFailPlugin())
+    loader.records = [record]
+
+    loader.initialize_all(object())
+    loader.shutdown_all()
+
+    assert state["cleanup"] == 1
+    assert record.enabled is False
+    assert record.stage == "initialize"
+    assert record.error == "init exploded"
+
+
 def test_shutdown_failure_does_not_block_other_plugins():
     state = {"bad": 0, "good": 0}
     failures = []
