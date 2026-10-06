@@ -4,9 +4,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -159,7 +159,11 @@ class AnalysisWidget(QWidget):
         path = Path(selected.data(Qt.ItemDataRole.UserRole))
         jeb = ROOT_DIR / "jar" / "jeb.jar"
         if not jeb.exists():
-            QMessageBox.warning(self, "Not found", "jeb.jar was not found in jar/.")
+            QMessageBox.warning(
+                self,
+                "JEB not configured",
+                "JEB is not bundled with ReForge. Configure your separately licensed JEB installation before using this integration.",
+            )
             return
 
         try:
@@ -177,7 +181,7 @@ class AnalysisPlugin(BasePlugin):
     def __init__(self):
         super().__init__()
         self.name = "Analysis"
-        self.description = "TypeLib/SigLib browser and JEB integration."
+        self.description = "TypeLib/SigLib browser and optional JEB integration."
         self.widget = None
 
     def activate(self) -> None:
