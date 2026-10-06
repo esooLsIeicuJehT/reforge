@@ -14,7 +14,8 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BUILD_ROOT = ROOT / "build" / "native"
+DEPLOY_ROOT = ROOT / "deployment"
+LEGACY_BUILD_ROOT = ROOT / "build" / "native"
 
 
 def _run(
@@ -27,6 +28,10 @@ def _run(
     printable = ["***" if part in secrets else part for part in cmd]
     print("+", " ".join(printable), flush=True)
     subprocess.run(cmd, check=True, env=env)
+
+
+def _roots() -> tuple[Path, ...]:
+    return tuple(root for root in (DEPLOY_ROOT, LEGACY_BUILD_ROOT) if root.exists())
 
 
 def _find_signtool() -> Path:
@@ -53,7 +58,7 @@ def _sign_windows() -> None:
     cert_b64 = os.environ["WINDOWS_CERTIFICATE_BASE64"]
     password = os.environ["WINDOWS_CERTIFICATE_PASSWORD"]
     timestamp_url = os.getenv("WINDOWS_TIMESTAMP_URL", "http://timestamp.digicert.com")
-    targets = sorted(BUILD_ROOT.rglob("*.exe"))
+    targets = sorted({path.resolve() for root in _roots() for path in root.rglob("*.exe")})
     if not targets:
         raise RuntimeError("No Windows executable found to sign")
 
@@ -86,7 +91,7 @@ def _sign_macos() -> None:
     cert_b64 = os.environ["APPLE_CERTIFICATE_BASE64"]
     cert_password = os.environ["APPLE_CERTIFICATE_PASSWORD"]
     identity = os.environ["APPLE_SIGNING_IDENTITY"]
-    targets = sorted(BUILD_ROOT.glob("*.app"))
+    targets = sorted({path.resolve() for root in _roots() for path in root.glob("*.app")})
     if not targets:
         raise RuntimeError("No macOS .app bundle found to sign")
 
