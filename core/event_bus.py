@@ -1,111 +1,124 @@
-"""
-ReForge Event Bus — Decoupled inter-plugin messaging backbone.
-Supports typed events, priority subscribers, and wildcard listeners.
-"""
+"""Thread-safe in-process event bus used by ReForge plugins."""
 from __future__ import annotations
-import threading
+
 import logging
+import threading
 from collections import defaultdict
-from typing import Callable, Any
+from typing import Callable
 
 log = logging.getLogger("reforge.event_bus")
 
 
 class Event:
-    """Immutable event envelope passed to every subscriber."""
+    """Event envelope passed to subscribers."""
+
     def __init__(self, name: str, payload: dict | None = None, source: str = "unknown"):
-        self.name    = name
+        self.name = name
         self.payload = payload or {}
-        self.source  = source
+        self.source = source
         self._cancelled = False
 
-    def cancel(self):
-        """Cancellable events: remaining lower-priority handlers are skipped."""
+    def cancel(self) -> None:
         self._cancelled = True
 
     @property
-    def cancelled(self):
+    def cancelled(self) -> bool:
         return self._cancelled
 
-    def __repr__(self):
-        return f"<Event name={self.name!r} source={self.source!r} payload={self.payload}>"
+    def __repr__(self) -> str:
+        return (
+            f"<Event name={self.name!r} source={self.source!r} "
+            f"payload={self.payload}>"
+        )
 
 
 class EventBus:
-    """
-    Thread-safe, singleton-style event bus.
-
-    Usage:
-        bus = EventBus()
-        bus.subscribe("device.connected", my_handler)
-        bus.emit("device.connected", payload={"serial": "ABC123"}, source="adb_plugin")
-    """
+    """Thread-safe synchronous event dispatcher with priorities and wildcards."""
 
     def __init__(self):
-        self._lock       = threading.Lock()
-        # {event_name: [(priority, handler)]}
-        self._handlers:  dict[str, list[tuple[int, Callable]]] = defaultdict(list)
-        self._wildcards: list[tuple[int, Callable]] = []   # handlers subscribed to "*"
+        self._lock = threading.Lock()
+        self._handlers: dict[str, list[tuple[int, Callable]]] = defaultdict(list)
+        self._wildcards: list[tuple[int, Callable]] = []
 
-    # ------------------------------------------------------------------
-    def subscribe(self, name: str, handler: Callable, priority: int = 50):
-        """
-        Register *handler* to receive events named *name*.
-        Lower priority number = called first.  Use name="*" for all events.
-        """
+    def subscribe(self, name: str, handler: Callable, priority: int = 50) -> None:
+        with self._lock:
+            target = self._wildcards if name == "*" else self._handlers[name]
+            if any(existing == handler for _, existing in target):
+                return
+            target.append((priority, handler))
+            target.sort(key=lambda item: item[0])
+
+        log.debug(
+            "[BUS] subscribed %s -> %s (priority=%d)",
+            name,
+            getattr(handler, "__qualname__", repr(handler)),
+            priority,
+        )
+
+    def unsubscribe(self, name: str, handler: Callable) -> None:
         with self._lock:
             if name == "*":
-                self._wildcards.append((priority, handler))
-                self._wildcards.sort(key=lambda x: x[0])
+                self._wildcards = [
+                    (priority, existing)
+                    for priority, existing in self._wildcards
+                    if existing != handler
+                ]
             else:
-                self._handlers[name].append((priority, handler))
-                self._handlers[name].sort(key=lambda x: x[0])
-        log.debug("[BUS] subscribed %s → %s (priority=%d)", name, handler.__qualname__, priority)
+                self._handlers[name] = [
+                    (priority, existing)
+                    for priority, existing in self._handlers[name]
+                    if existing != handler
+                ]
 
-    def unsubscribe(self, name: str, handler: Callable):
-        with self._lock:
-            if name == "*":
-                self._wildcards = [(p, h) for p, h in self._wildcards if h is not handler]
-            else:
-                self._handlers[name] = [(p, h) for p, h in self._handlers[name] if h is not handler]
-
-    # ------------------------------------------------------------------
-    def emit(self, name: str, payload: dict | None = None, source: str = "core") -> Event:
-        """
-        Fire an event synchronously.  Returns the Event so callers can
-        inspect whether it was cancelled.
-        """
+    def emit(
+        self,
+        name: str,
+        payload: dict | None = None,
+        source: str = "core",
+    ) -> Event:
         event = Event(name, payload, source)
-        log.debug("[BUS] ⚡ emit %-30s from %-20s payload=%s", name, source, payload)
 
         with self._lock:
-            # snapshot to avoid lock re-entry issues
-            handlers  = list(self._handlers.get(name, []))
-            wildcards = list(self._wildcards)
+            handlers = [
+                *self._handlers.get(name, []),
+                *self._wildcards,
+            ]
+        handlers.sort(key=lambda item: item[0])
 
-        for _, handler in handlers + wildcards:
+        for _, handler in handlers:
             if event.cancelled:
                 break
             try:
                 handler(event)
-            except Exception as exc:
-                log.exception("[BUS] handler %s raised during event %r: %s",
-                              handler.__qualname__, name, exc)
+            except Exception:
+                log.exception(
+                    "[BUS] handler %s raised during event %r",
+                    getattr(handler, "__qualname__", repr(handler)),
+                    name,
+                )
         return event
 
-    def emit_async(self, name: str, payload: dict | None = None, source: str = "core"):
-        """Fire the event in a daemon thread (fire-and-forget)."""
-        t = threading.Thread(target=self.emit, args=(name, payload, source), daemon=True)
-        t.start()
+    def emit_async(
+        self,
+        name: str,
+        payload: dict | None = None,
+        source: str = "core",
+    ) -> threading.Thread:
+        thread = threading.Thread(
+            target=self.emit,
+            args=(name, payload, source),
+            daemon=True,
+            name=f"reforge-event-{name}",
+        )
+        thread.start()
+        return thread
 
-    # Convenience shorthand used by plugins
     def on(self, name: str, priority: int = 50):
-        """Decorator — @bus.on('some.event')"""
         def decorator(fn: Callable):
             self.subscribe(name, fn, priority)
             return fn
+
         return decorator
 
 
-# Global singleton every module can import directly
 bus = EventBus()
