@@ -17,8 +17,14 @@ ROOT = Path(__file__).resolve().parents[2]
 BUILD_ROOT = ROOT / "build" / "native"
 
 
-def _run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
-    printable = ["***" if "password" in part.lower() else part for part in cmd]
+def _run(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    sensitive_values: tuple[str, ...] = (),
+) -> None:
+    secrets = {value for value in sensitive_values if value}
+    printable = ["***" if part in secrets else part for part in cmd]
     print("+", " ".join(printable), flush=True)
     subprocess.run(cmd, check=True, env=env)
 
@@ -71,7 +77,8 @@ def _sign_windows() -> None:
                     "/p",
                     password,
                     str(target),
-                ]
+                ],
+                sensitive_values=(password,),
             )
 
 
@@ -89,10 +96,17 @@ def _sign_macos() -> None:
         keychain = temp / "signing.keychain-db"
         keychain_password = base64.urlsafe_b64encode(os.urandom(24)).decode("ascii")
         cert.write_bytes(base64.b64decode(cert_b64))
+        keychain_secret = (keychain_password,)
 
-        _run(["security", "create-keychain", "-p", keychain_password, str(keychain)])
+        _run(
+            ["security", "create-keychain", "-p", keychain_password, str(keychain)],
+            sensitive_values=keychain_secret,
+        )
         _run(["security", "set-keychain-settings", "-lut", "21600", str(keychain)])
-        _run(["security", "unlock-keychain", "-p", keychain_password, str(keychain)])
+        _run(
+            ["security", "unlock-keychain", "-p", keychain_password, str(keychain)],
+            sensitive_values=keychain_secret,
+        )
         _run(
             [
                 "security",
@@ -107,7 +121,8 @@ def _sign_macos() -> None:
                 "pkcs12",
                 "-k",
                 str(keychain),
-            ]
+            ],
+            sensitive_values=(cert_password,),
         )
         _run(
             [
@@ -119,7 +134,8 @@ def _sign_macos() -> None:
                 "-k",
                 keychain_password,
                 str(keychain),
-            ]
+            ],
+            sensitive_values=keychain_secret,
         )
 
         env = os.environ.copy()
