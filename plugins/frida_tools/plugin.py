@@ -7,9 +7,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -68,8 +68,8 @@ Java.perform(function() {
 
 
 class _FridaWorker(QThread):
-    line = pyqtSignal(str)
-    done = pyqtSignal(int)
+    line = Signal(str)
+    done = Signal(int)
 
     def __init__(self, args: list[str]):
         super().__init__()
