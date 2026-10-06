@@ -14,7 +14,9 @@ venv/
 env/
 build/
 dist/
+release/
 *.egg-info/
+pysidedeploy.spec
 
 # Runtime state
 logs/
