@@ -20,8 +20,6 @@ jobs:
           - os: ubuntu-latest
             python: "3.10"
           - os: ubuntu-latest
-            python: "3.12"
-          - os: ubuntu-latest
             python: "3.14"
           - os: windows-latest
             python: "3.12"
@@ -59,5 +57,5 @@ jobs:
         run: pytest
 
       - name: Build source and wheel distributions
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
         run: python -m build
