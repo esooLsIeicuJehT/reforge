@@ -30,19 +30,23 @@ def _sha256(path: Path) -> str:
 
 
 def _find_deployed_output() -> Path:
-    candidates: list[Path] = []
-    for root in (DEPLOY_ROOT, LEGACY_BUILD_ROOT):
-        if not root.exists():
-            continue
-        candidates.extend(root.glob("*.dist"))
-        candidates.extend(root.glob("*.app"))
-        candidates.extend(root.glob("*.exe"))
-        candidates.extend(root.glob("*.bin"))
-    if not candidates:
-        raise RuntimeError(
-            f"No native deployment output found in {DEPLOY_ROOT} or {LEGACY_BUILD_ROOT}"
-        )
-    return sorted({path.resolve() for path in candidates})[0]
+    roots = (DEPLOY_ROOT, LEGACY_BUILD_ROOT)
+    # Prefer a complete standalone directory or app bundle. Nuitka may also
+    # leave a launcher executable beside the .dist directory; packaging that
+    # executable alone would omit its runtime dependencies.
+    for patterns in (("*.dist", "*.app"), ("*.exe", "*.bin")):
+        candidates: set[Path] = set()
+        for root in roots:
+            if not root.exists():
+                continue
+            for pattern in patterns:
+                candidates.update(path.resolve() for path in root.glob(pattern))
+        if candidates:
+            return sorted(candidates)[0]
+
+    raise RuntimeError(
+        f"No native deployment output found in {DEPLOY_ROOT} or {LEGACY_BUILD_ROOT}"
+    )
 
 
 def _copy_release_material(stage: Path) -> None:
