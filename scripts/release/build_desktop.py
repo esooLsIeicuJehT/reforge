@@ -31,7 +31,10 @@ def _configure_spec(spec_path: Path) -> None:
     parser["app"]["title"] = "ReForge"
     parser["app"]["project_dir"] = str(ROOT)
     parser["app"]["input_file"] = str(ROOT / "main.py")
-    parser["app"]["project_file"] = str(ROOT / "pyproject.toml")
+    # pyside6-deploy's project_file is a Qt for Python project descriptor,
+    # not Python packaging metadata. ReForge does not use a pyside6-project
+    # descriptor, so leave this empty and deploy directly from main.py.
+    parser["app"]["project_file"] = ""
     parser["app"]["exec_directory"] = str(BUILD_ROOT)
 
     deploy_packages = ["nuitka==4.1.1", "ordered_set", "zstandard"]
