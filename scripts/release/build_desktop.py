@@ -1,0 +1,140 @@
+"""Build a native ReForge desktop artifact with Qt for Python's deploy tool."""
+from __future__ import annotations
+
+import configparser
+import importlib.metadata
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+DEPLOY_ROOT = ROOT / "deployment"
+LEGACY_BUILD_ROOT = ROOT / "build" / "native"
+GENERATED_SPEC = ROOT / "pysidedeploy.spec"
+WORK_SPEC = ROOT / "build" / "pysidedeploy.release.spec"
+
+
+def _run(cmd: list[str]) -> None:
+    print("+", " ".join(cmd), flush=True)
+    subprocess.run(cmd, cwd=ROOT, check=True)
+
+
+def _configure_spec(spec_path: Path) -> None:
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read(spec_path, encoding="utf-8")
+
+    for section in ("app", "python", "qt", "nuitka"):
+        if not parser.has_section(section):
+            parser.add_section(section)
+
+    parser["app"]["title"] = "ReForge"
+    parser["app"]["project_dir"] = str(ROOT)
+    parser["app"]["input_file"] = str(ROOT / "main.py")
+    # project_file is a Qt for Python project descriptor, not pyproject.toml.
+    parser["app"]["project_file"] = ""
+
+    # pyside6-deploy manages its build output under ROOT/deployment. The
+    # release workflow preinstalls the exact compiler toolchain versions, and
+    # these names tell deploy which helpers it may require without making the
+    # release metadata claim a version different from what is actually used.
+    deploy_packages = ["nuitka", "ordered_set", "zstandard"]
+    if sys.platform.startswith("linux"):
+        deploy_packages.append("patchelf")
+    parser["python"]["python_path"] = sys.executable
+    parser["python"]["packages"] = ",".join(deploy_packages)
+
+    parser["qt"]["modules"] = "Core,Gui,Widgets"
+
+    # The trusted registry imports each production plugin statically. Keeping
+    # these package boundaries explicit makes the compiler input deterministic.
+    extra_args = [
+        "--quiet",
+        "--noinclude-qt-translations",
+        "--include-package=plugins",
+        "--include-package=core",
+        "--include-package=gui",
+    ]
+    if sys.platform == "darwin":
+        extra_args.append("--macos-create-app-bundle")
+
+    parser["nuitka"]["mode"] = "standalone"
+    parser["nuitka"]["extra_args"] = " ".join(extra_args)
+
+    WORK_SPEC.parent.mkdir(parents=True, exist_ok=True)
+    with WORK_SPEC.open("w", encoding="utf-8") as handle:
+        parser.write(handle)
+
+
+def _discover_outputs() -> list[str]:
+    outputs: set[str] = set()
+    for root in (DEPLOY_ROOT, LEGACY_BUILD_ROOT):
+        if not root.exists():
+            continue
+        for path in root.iterdir():
+            if path.name.endswith(".dist") or path.suffix.lower() in {".app", ".exe", ".bin"}:
+                outputs.add(str(path.resolve()))
+    return sorted(outputs)
+
+
+def main() -> int:
+    deploy = shutil.which("pyside6-deploy")
+    if not deploy:
+        raise SystemExit("pyside6-deploy is not available on PATH")
+
+    DEPLOY_ROOT.mkdir(parents=True, exist_ok=True)
+    WORK_SPEC.parent.mkdir(parents=True, exist_ok=True)
+    original_spec = GENERATED_SPEC.read_bytes() if GENERATED_SPEC.exists() else None
+
+    try:
+        _run([deploy, str(ROOT / "main.py"), "--init", "-f"])
+        if not GENERATED_SPEC.exists():
+            raise RuntimeError("pyside6-deploy did not generate pysidedeploy.spec")
+        _configure_spec(GENERATED_SPEC)
+        _run(
+            [
+                deploy,
+                "-c",
+                str(WORK_SPEC),
+                "-f",
+                "--keep-deployment-files",
+                "--name",
+                "ReForge",
+            ]
+        )
+    finally:
+        if original_spec is None:
+            GENERATED_SPEC.unlink(missing_ok=True)
+        else:
+            GENERATED_SPEC.write_bytes(original_spec)
+
+    outputs = _discover_outputs()
+    if not outputs:
+        raise RuntimeError(
+            f"No deployed artifact found in {DEPLOY_ROOT} or {LEGACY_BUILD_ROOT}"
+        )
+
+    metadata = {
+        "application": "ReForge",
+        "application_version": importlib.metadata.version("reforge-toolkit"),
+        "platform": sys.platform,
+        "python": sys.version,
+        "pyside": importlib.metadata.version("PySide6"),
+        "nuitka": importlib.metadata.version("Nuitka"),
+        "outputs": outputs,
+        "source_commit": os.getenv("GITHUB_SHA", "local"),
+        "source_date_epoch": os.getenv("SOURCE_DATE_EPOCH", ""),
+    }
+    metadata_path = ROOT / "build" / "release-build.json"
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(metadata, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

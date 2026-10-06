@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from core.config_manager import ConfigManager
 from core.loader import Loader
 from core.logger import get_logger, install_global_except_hook
 from gui.main_window import MainWindow
+from gui.theme import DARK_THEME
 
-APP_ROOT = Path(__file__).resolve().parent
 log = get_logger("main")
 
 
@@ -19,19 +19,19 @@ def main() -> int:
     install_global_except_hook()
     log.info("ReForge starting up")
 
+    smoke_test = "--smoke-test" in sys.argv
+    qt_args = [arg for arg in sys.argv if arg != "--smoke-test"]
+
     config = ConfigManager()
-    app = QApplication(sys.argv)
+    app = QApplication(qt_args)
     app.setApplicationName("ReForge")
     app.setOrganizationName("ReForge")
     app.setStyle("Fusion")
+    app.setStyleSheet(DARK_THEME)
 
-    stylesheet = APP_ROOT / "gui" / "dark_theme.qss"
-    try:
-        app.setStyleSheet(stylesheet.read_text(encoding="utf-8"))
-    except OSError as exc:
-        log.warning("Could not load %s: %s", stylesheet, exc)
-
-    loader = Loader(plugin_dir=APP_ROOT / "plugins")
+    # Production builds use the explicit trusted plugin registry. This avoids
+    # filesystem scanning assumptions and keeps frozen bundles deterministic.
+    loader = Loader()
     exit_code = 1
 
     try:
@@ -39,6 +39,11 @@ def main() -> int:
         main_window = MainWindow(config)
         main_window.show()
         loader.initialize_all(main_window)
+
+        if smoke_test:
+            log.info("Smoke-test mode enabled; scheduling clean shutdown")
+            QTimer.singleShot(750, app.quit)
+
         exit_code = app.exec()
         return exit_code
     finally:
