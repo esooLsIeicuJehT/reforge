@@ -6,9 +6,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QGroupBox,
@@ -52,8 +52,8 @@ def _display_cmd(args: list[str]) -> str:
 
 
 class _Worker(QThread):
-    line = pyqtSignal(str)
-    done = pyqtSignal(int)
+    line = Signal(str)
+    done = Signal(int)
 
     def __init__(self, args: list[str]):
         super().__init__()

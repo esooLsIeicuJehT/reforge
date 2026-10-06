@@ -1,72 +1,42 @@
-"""
-Frida Tools Plugin — Script generation, process attachment, dynamic hooks.
-Requires: frida-tools (pip), frida server on device.
-"""
-import subprocess, shutil, re
+"""Frida integration for authorized dynamic instrumentation workflows."""
+from __future__ import annotations
+
+import shlex
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QComboBox,
-    QPlainTextEdit, QLineEdit, QGroupBox, QFileDialog, QCheckBox
+
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QFont
-from core.plugin_manager import BasePlugin
+
 from core.event_bus import bus
 from core.logger import get_logger
+from core.plugin_manager import BasePlugin
 
 log = get_logger("plugin.frida_tools")
 
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-ADB_DIR  = ROOT_DIR / "adb"
-_adb_bin = ADB_DIR / "adb"
-ADB      = str(_adb_bin) if _adb_bin.exists() else "adb"
+FRIDA_BIN = shutil.which("frida")
+FRIDA_PS_BIN = shutil.which("frida-ps")
+FRIDA_AVAILABLE = bool(FRIDA_BIN and FRIDA_PS_BIN)
+WORK_DIR = Path.home() / ".reforge" / "work"
 
-FRIDA_AVAILABLE = bool(shutil.which("frida") or shutil.which("frida-ps"))
-
-# ── Boilerplate hook templates ─────────────────────────────────────
 TEMPLATES = {
-    "SSL Unpin (Java)": """\
-Java.perform(function() {
-    var TrustManager = Java.use('javax.net.ssl.X509TrustManager');
-    var SSLContext = Java.use('javax.net.ssl.SSLContext');
-    var TrustManagerImpl = Java.registerClass({
-        name: 'com.reforge.TrustManager',
-        implements: [TrustManager],
-        methods: {
-            checkClientTrusted: function(chain, authType) {},
-            checkServerTrusted: function(chain, authType) {},
-            getAcceptedIssuers: function() { return []; }
-        }
-    });
-    var ctx = SSLContext.getInstance('TLS');
-    ctx.init(null, [TrustManagerImpl.$new()], null);
-    SSLContext.getDefault.implementation = function() { return ctx; };
-    console.log('[+] SSL pinning bypassed');
-});
-""",
-    "Root Detection Bypass": """\
-Java.perform(function() {
-    var RootBeer = null;
-    try { RootBeer = Java.use('com.scottyab.rootbeer.RootBeer'); } catch(e) {}
-    if (RootBeer) {
-        RootBeer.isRooted.implementation = function() {
-            console.log('[+] RootBeer.isRooted -> false'); return false;
-        };
-    }
-    var Build = Java.use('android.os.Build.Tags');
-    // Patches common root file checks
-    var File = Java.use('java.io.File');
-    File.exists.implementation = function() {
-        var path = this.getAbsolutePath();
-        if (path.indexOf('su') !== -1 || path.indexOf('superuser') !== -1) {
-            console.log('[+] Blocked file check: ' + path); return false;
-        }
-        return this.exists();
-    };
-});
-""",
     "Method Tracer": """\
-// Replace com.example.ClassName with your target
+// Replace com.example.ClassName with a class in software you are authorized to inspect.
 var TargetClass = 'com.example.ClassName';
 Java.perform(function() {
     var Clazz = Java.use(TargetClass);
@@ -79,9 +49,9 @@ Java.perform(function() {
                     return overload.apply(this, arguments);
                 };
             });
-        } catch(e) {}
+        } catch (e) {}
     });
-    console.log('[+] All methods in ' + TargetClass + ' traced');
+    console.log('[+] Tracing methods in ' + TargetClass);
 });
 """,
     "Intent Logger": """\
@@ -93,39 +63,48 @@ Java.perform(function() {
     };
 });
 """,
-    "Blank Script": "// Your Frida script here\nJava.perform(function() {\n\n});\n",
+    "Blank Script": "// Authorized Frida script\nJava.perform(function() {\n\n});\n",
 }
 
 
 class _FridaWorker(QThread):
-    line = pyqtSignal(str)
-    done = pyqtSignal(int)
+    line = Signal(str)
+    done = Signal(int)
 
-    def __init__(self, cmd):
+    def __init__(self, args: list[str]):
         super().__init__()
-        self.cmd  = cmd
-        self._proc = None
+        self.args = args
+        self._proc: subprocess.Popen[str] | None = None
 
-    def run(self):
+    def run(self) -> None:
         try:
             self._proc = subprocess.Popen(
-                self.cmd, shell=True, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True
+                self.args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
             )
-            for ln in self._proc.stdout:
-                self.line.emit(ln.rstrip())
+            if self._proc.stdout is not None:
+                for line in self._proc.stdout:
+                    self.line.emit(line.rstrip())
             self._proc.wait()
             self.done.emit(self._proc.returncode)
-        except Exception as e:
-            self.line.emit(f"[ERR] {e}")
+        except Exception as exc:
+            log.exception("Frida command failed: %s", self.args)
+            self.line.emit(f"[ERR] {exc}")
             self.done.emit(1)
 
-    def stop(self):
-        if self._proc:
-            try:
-                self._proc.terminate()
-            except Exception:
-                pass
+    def stop(self) -> None:
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        except Exception:
+            log.exception("Failed to stop Frida process")
 
 
 class FridaToolsWidget(QWidget):
@@ -134,166 +113,232 @@ class FridaToolsWidget(QWidget):
         vbox = QVBoxLayout(self)
 
         if not FRIDA_AVAILABLE:
-            warn = QLabel("⚠  frida-tools not found on PATH.\n"
-                          "Install: pip install frida-tools\n"
-                          "Also push frida-server to device /data/local/tmp/")
+            warn = QLabel(
+                "⚠ frida and frida-ps were not found on PATH.\n"
+                "Install frida-tools and configure an authorized Frida target before use."
+            )
             warn.setStyleSheet("color: #ff9800; padding: 8px;")
             vbox.addWidget(warn)
 
-        # ── Device / process selection ─────────────────────────────
-        dev_grp = QGroupBox("Target")
-        dv = QVBoxLayout(dev_grp)
+        dev_group = QGroupBox("Target")
+        dev_layout = QVBoxLayout(dev_group)
 
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Device serial (blank=USB):"))
-        self.serial = QLineEdit(); self.serial.setPlaceholderText("emulator-5554")
-        r1.addWidget(self.serial)
-        dv.addLayout(r1)
+        serial_row = QHBoxLayout()
+        serial_row.addWidget(QLabel("Device serial (blank = USB):"))
+        self.serial = QLineEdit()
+        self.serial.setPlaceholderText("emulator-5554")
+        serial_row.addWidget(self.serial)
+        dev_layout.addLayout(serial_row)
 
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("Package / PID:"))
-        self.pkg = QLineEdit(); self.pkg.setPlaceholderText("com.example.app")
-        r2.addWidget(self.pkg)
-        self.spawn_chk = QCheckBox("Spawn (not attach)")
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Package / process name / PID:"))
+        self.pkg = QLineEdit()
+        self.pkg.setPlaceholderText("com.example.app")
+        target_row.addWidget(self.pkg)
+        self.spawn_chk = QCheckBox("Spawn")
         self.spawn_chk.setChecked(True)
-        r2.addWidget(self.spawn_chk)
-        dv.addLayout(r2)
+        target_row.addWidget(self.spawn_chk)
+        dev_layout.addLayout(target_row)
 
         list_btn = QPushButton("🔍 List Processes")
         list_btn.clicked.connect(self._list_procs)
-        dv.addWidget(list_btn)
-        vbox.addWidget(dev_grp)
+        dev_layout.addWidget(list_btn)
+        vbox.addWidget(dev_group)
 
-        # ── Script editor ──────────────────────────────────────────
-        script_grp = QGroupBox("Frida Script")
-        sv = QVBoxLayout(script_grp)
+        script_group = QGroupBox("Frida Script")
+        script_layout = QVBoxLayout(script_group)
 
-        tmpl_row = QHBoxLayout()
-        tmpl_row.addWidget(QLabel("Template:"))
+        template_row = QHBoxLayout()
+        template_row.addWidget(QLabel("Template:"))
         self.tmpl_combo = QComboBox()
         self.tmpl_combo.addItems(list(TEMPLATES.keys()))
         self.tmpl_combo.currentTextChanged.connect(self._load_template)
-        tmpl_row.addWidget(self.tmpl_combo)
+        template_row.addWidget(self.tmpl_combo)
+
         load_file_btn = QPushButton("📂 Load .js")
         load_file_btn.clicked.connect(self._load_file)
-        tmpl_row.addWidget(load_file_btn)
+        template_row.addWidget(load_file_btn)
+
         save_btn = QPushButton("💾 Save .js")
         save_btn.clicked.connect(self._save_file)
-        tmpl_row.addWidget(save_btn)
-        sv.addLayout(tmpl_row)
+        template_row.addWidget(save_btn)
+        script_layout.addLayout(template_row)
 
         self.editor = QPlainTextEdit()
         self.editor.setFont(QFont("Monospace", 9))
         self.editor.setMinimumHeight(200)
-        sv.addLayout(tmpl_row)
-        sv.addWidget(self.editor)
-        vbox.addWidget(script_grp)
+        script_layout.addWidget(self.editor)
+        vbox.addWidget(script_group)
 
-        # ── Run controls ───────────────────────────────────────────
-        ctrl = QHBoxLayout()
-        self.run_btn  = QPushButton("▶  Inject Script")
+        controls = QHBoxLayout()
+        self.run_btn = QPushButton("▶ Run Script")
         self.run_btn.clicked.connect(self._inject)
-        ctrl.addWidget(self.run_btn)
-        self.stop_btn = QPushButton("■  Stop")
+        controls.addWidget(self.run_btn)
+
+        self.stop_btn = QPushButton("■ Stop")
         self.stop_btn.clicked.connect(self._stop)
         self.stop_btn.setEnabled(False)
-        ctrl.addWidget(self.stop_btn)
-        clr = QPushButton("✖  Clear")
-        clr.clicked.connect(lambda: self.console.clear())
-        ctrl.addWidget(clr)
-        vbox.addLayout(ctrl)
+        controls.addWidget(self.stop_btn)
 
-        # ── Output ─────────────────────────────────────────────────
+        clear_btn = QPushButton("✖ Clear")
+        clear_btn.clicked.connect(self.console_clear)
+        controls.addWidget(clear_btn)
+        vbox.addLayout(controls)
+
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setFont(QFont("Monospace", 9))
         vbox.addWidget(self.console)
 
-        self._worker = None
+        self._worker: _FridaWorker | None = None
+        self._background_workers: list[_FridaWorker] = []
+        self._temp_script: Path | None = None
         self._load_template(self.tmpl_combo.currentText())
+        self._set_availability_state()
 
-    def _load_template(self, name: str):
+    def _set_availability_state(self) -> None:
+        self.run_btn.setEnabled(FRIDA_AVAILABLE)
+
+    def console_clear(self) -> None:
+        self.console.clear()
+
+    def _device_args(self) -> list[str]:
+        serial = self.serial.text().strip()
+        return ["-D", serial] if serial else ["-U"]
+
+    def _load_template(self, name: str) -> None:
         self.editor.setPlainText(TEMPLATES.get(name, ""))
 
-    def _load_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load script", str(ROOT_DIR), "JS (*.js);;All (*)"
-        )
-        if path:
-            self.editor.setPlainText(Path(path).read_text(errors="replace"))
+    def _load_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Load script", str(Path.home()), "JS (*.js);;All (*)")
+        if not path:
+            return
+        try:
+            self.editor.setPlainText(Path(path).read_text(encoding="utf-8", errors="replace"))
+        except OSError as exc:
+            self.console.appendPlainText(f"[ERR] Could not load script: {exc}")
 
-    def _save_file(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save script", str(ROOT_DIR / "frida_hook.js"), "JS (*.js)"
-        )
-        if path:
-            Path(path).write_text(self.editor.toPlainText())
+    def _save_file(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Save script", str(Path.home() / "frida_hook.js"), "JS (*.js)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(self.editor.toPlainText(), encoding="utf-8")
             log.info("[FRIDA] script saved: %s", path)
+        except OSError as exc:
+            self.console.appendPlainText(f"[ERR] Could not save script: {exc}")
 
-    def _list_procs(self):
-        s = self.serial.text().strip()
-        dev_flag = f"-D {s}" if s else "-U"
-        self._run_cmd(f"frida-ps {dev_flag} -a")
+    def _list_procs(self) -> None:
+        if FRIDA_PS_BIN is None:
+            self.console.appendPlainText("[ERR] frida-ps is not available")
+            return
+        self._run_background([FRIDA_PS_BIN, *self._device_args(), "-a"])
 
-    def _inject(self):
-        pkg    = self.pkg.text().strip()
-        if not pkg:
-            self.console.appendPlainText("[!] No package/PID specified"); return
+    def _inject(self) -> None:
+        if FRIDA_BIN is None:
+            self.console.appendPlainText("[ERR] frida is not available")
+            return
 
-        # Write script to temp file
-        import tempfile
-        tmp = Path(tempfile.mktemp(suffix=".js", dir=ROOT_DIR / "work_dirs"))
-        (ROOT_DIR / "work_dirs").mkdir(exist_ok=True)
-        tmp.write_text(self.editor.toPlainText())
+        target = self.pkg.text().strip()
+        if not target:
+            self.console.appendPlainText("[!] No package, process name, or PID specified")
+            return
 
-        s       = self.serial.text().strip()
-        dev_flag = f"-D {s}" if s else "-U"
-        mode     = "-f" if self.spawn_chk.isChecked() else "-n"
-        cmd      = f'frida {dev_flag} {mode} "{pkg}" -l "{tmp}" --no-pause'
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".js",
+            prefix="reforge-frida-",
+            dir=WORK_DIR,
+            delete=False,
+            encoding="utf-8",
+        ) as handle:
+            handle.write(self.editor.toPlainText())
+            script_path = Path(handle.name)
+        self._temp_script = script_path
 
-        self.console.appendPlainText(f"\n$ {cmd}")
-        log.info("[FRIDA] injecting: %s", cmd)
-        bus.emit("frida.inject", {"pkg": pkg, "script": str(tmp)}, source="frida_tools")
+        if self.spawn_chk.isChecked():
+            target_args = ["-f", target]
+        elif target.isdigit():
+            target_args = ["-p", target]
+        else:
+            target_args = ["-n", target]
 
-        self._worker = _FridaWorker(cmd)
+        args = [FRIDA_BIN, *self._device_args(), *target_args, "-l", str(script_path)]
+        self._start_primary(args, target)
+
+    def _start_primary(self, args: list[str], target: str) -> None:
+        self.console.appendPlainText(f"\n$ {shlex.join(args)}")
+        log.info("[FRIDA] starting: %s", shlex.join(args))
+        bus.emit("frida.run", {"target": target}, source="frida_tools")
+
+        self._worker = _FridaWorker(args)
         self._worker.line.connect(self.console.appendPlainText)
-        self._worker.done.connect(self._on_done)
+        self._worker.done.connect(self._on_primary_done)
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._worker.start()
 
-    def _stop(self):
-        if self._worker:
-            self._worker.stop()
-        self.run_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+    def _run_background(self, args: list[str]) -> None:
+        self.console.appendPlainText(f"\n$ {shlex.join(args)}")
+        worker = _FridaWorker(args)
+        self._background_workers.append(worker)
+        worker.line.connect(self.console.appendPlainText)
+        worker.done.connect(lambda rc, w=worker: self._on_background_done(w, rc))
+        worker.start()
 
-    def _on_done(self, rc: int):
+    def _on_background_done(self, worker: _FridaWorker, rc: int) -> None:
         self.console.appendPlainText(f"[exit {rc}]")
-        self.run_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        if worker in self._background_workers:
+            self._background_workers.remove(worker)
+        worker.deleteLater()
 
-    def _run_cmd(self, cmd: str):
-        self.console.appendPlainText(f"\n$ {cmd}")
-        w = _FridaWorker(cmd)
-        w.line.connect(self.console.appendPlainText)
-        w.done.connect(lambda rc: self.console.appendPlainText(f"[exit {rc}]"))
-        w.start()
+    def _stop(self) -> None:
+        if self._worker is not None:
+            self._worker.stop()
+
+    def _on_primary_done(self, rc: int) -> None:
+        self.console.appendPlainText(f"[exit {rc}]")
+        self.stop_btn.setEnabled(False)
+        self.run_btn.setEnabled(FRIDA_AVAILABLE)
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
+        self._cleanup_temp_script()
+
+    def _cleanup_temp_script(self) -> None:
+        if self._temp_script is None:
+            return
+        try:
+            self._temp_script.unlink(missing_ok=True)
+        except OSError:
+            log.warning("Could not remove temporary Frida script: %s", self._temp_script)
+        self._temp_script = None
+
+    def shutdown(self) -> None:
+        if self._worker is not None:
+            self._worker.stop()
+            self._worker.wait(2000)
+        for worker in list(self._background_workers):
+            worker.stop()
+            worker.wait(2000)
+        self._background_workers.clear()
+        self._cleanup_temp_script()
 
 
 class FridaToolsPlugin(BasePlugin):
     def __init__(self):
         super().__init__()
-        self.name        = "Frida Tools"
-        self.description = "Dynamic hooks, script generation, SSL unpin, root bypass."
-        self.widget      = None
+        self.name = "Frida Tools"
+        self.description = "Authorized dynamic instrumentation and script execution."
+        self.widget: FridaToolsWidget | None = None
 
-    def initialize(self, main_window):
+    def initialize(self, main_window) -> None:
         self.widget = FridaToolsWidget()
         main_window.add_plugin_dock("Frida Tools", self.widget)
         log.info("Frida Tools plugin attached to GUI")
 
-    def shutdown(self):
-        if self.widget and self.widget._worker:
-            self.widget._worker.stop()
+    def shutdown(self) -> None:
+        if self.widget is not None:
+            self.widget.shutdown()
         self.widget = None

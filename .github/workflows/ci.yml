@@ -10,20 +10,39 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
     env:
       QT_QPA_PLATFORM: offscreen
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           cache: pip
+
+      - name: Install Linux Qt runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0
 
       - name: Install
         run: |
@@ -32,9 +51,11 @@ jobs:
           python -m pip check
 
       - name: Compile source
-        run: |
-          python -m compileall -q core gui plugins main.py
+        run: python -m compileall -q core gui plugins main.py
 
       - name: Run tests
-        run: |
-          pytest
+        run: pytest
+
+      - name: Build source and wheel distributions
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
+        run: python -m build

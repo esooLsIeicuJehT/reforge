@@ -1,4 +1,5 @@
-from PyQt6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox
+
 
 def show_error_dialog(title, message):
     msg = QMessageBox()
