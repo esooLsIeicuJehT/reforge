@@ -10,8 +10,23 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
     env:
       QT_QPA_PLATFORM: offscreen
 
@@ -22,7 +37,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           cache: pip
 
       - name: Install
@@ -32,9 +47,11 @@ jobs:
           python -m pip check
 
       - name: Compile source
-        run: |
-          python -m compileall -q core gui plugins main.py
+        run: python -m compileall -q core gui plugins main.py
 
       - name: Run tests
-        run: |
-          pytest
+        run: pytest
+
+      - name: Build source and wheel distributions
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: python -m build
