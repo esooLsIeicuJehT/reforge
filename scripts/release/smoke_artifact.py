@@ -10,14 +10,39 @@ from pathlib import Path
 
 def _find_executable(root: Path) -> Path:
     system = platform.system()
+    preferred: list[Path] = []
+
     if system == "Windows":
-        matches = sorted(root.rglob("ReForge.exe"))
+        for name in ("ReForge.exe", "main.exe"):
+            preferred.extend(root.rglob(name))
+        if not preferred:
+            preferred = [
+                path for path in root.rglob("*.exe")
+                if not any(part.lower() in {"qt6", "plugins"} for part in path.parts)
+            ]
     elif system == "Darwin":
-        matches = sorted(root.rglob("ReForge.app/Contents/MacOS/ReForge"))
+        for bundle_name in ("ReForge.app", "main.app"):
+            for bundle in root.rglob(bundle_name):
+                macos_dir = bundle / "Contents" / "MacOS"
+                if macos_dir.is_dir():
+                    preferred.extend(path for path in macos_dir.iterdir() if path.is_file())
+        if not preferred:
+            preferred = [
+                path
+                for path in root.rglob("*.app/Contents/MacOS/*")
+                if path.is_file()
+            ]
     else:
-        matches = sorted(root.rglob("ReForge.bin"))
+        for name in ("ReForge.bin", "main.bin", "ReForge", "main"):
+            preferred.extend(root.rglob(name))
+        preferred = [
+            path for path in preferred
+            if path.is_file() and os.access(path, os.X_OK)
+        ]
+
+    matches = sorted({path.resolve() for path in preferred})
     if not matches:
-        raise RuntimeError(f"No ReForge executable found under {root}")
+        raise RuntimeError(f"No packaged ReForge executable found under {root}")
     return matches[0]
 
 
