@@ -16,7 +16,8 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BUILD_ROOT = ROOT / "build" / "native"
+DEPLOY_ROOT = ROOT / "deployment"
+LEGACY_BUILD_ROOT = ROOT / "build" / "native"
 RELEASE_ROOT = ROOT / "release"
 
 
@@ -29,14 +30,19 @@ def _sha256(path: Path) -> str:
 
 
 def _find_deployed_output() -> Path:
-    candidates = list(BUILD_ROOT.glob("*.dist"))
+    candidates: list[Path] = []
+    for root in (DEPLOY_ROOT, LEGACY_BUILD_ROOT):
+        if not root.exists():
+            continue
+        candidates.extend(root.glob("*.dist"))
+        candidates.extend(root.glob("*.app"))
+        candidates.extend(root.glob("*.exe"))
+        candidates.extend(root.glob("*.bin"))
     if not candidates:
-        candidates = list(BUILD_ROOT.glob("*.app"))
-    if not candidates:
-        candidates = list(BUILD_ROOT.glob("*.exe")) + list(BUILD_ROOT.glob("*.bin"))
-    if not candidates:
-        raise RuntimeError(f"No native deployment output found in {BUILD_ROOT}")
-    return sorted(candidates)[0]
+        raise RuntimeError(
+            f"No native deployment output found in {DEPLOY_ROOT} or {LEGACY_BUILD_ROOT}"
+        )
+    return sorted({path.resolve() for path in candidates})[0]
 
 
 def _copy_release_material(stage: Path) -> None:
@@ -138,7 +144,7 @@ def _write_checksums(stage: Path) -> None:
 def _normalized_epoch() -> int:
     raw = os.getenv("SOURCE_DATE_EPOCH", "1704067200")
     try:
-        return max(int(raw), 315532800)  # ZIP cannot represent dates before 1980.
+        return max(int(raw), 315532800)
     except ValueError:
         return 1704067200
 
