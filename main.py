@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from core.config_manager import ConfigManager
@@ -19,8 +20,11 @@ def main() -> int:
     install_global_except_hook()
     log.info("ReForge starting up")
 
+    smoke_test = "--smoke-test" in sys.argv
+    qt_args = [arg for arg in sys.argv if arg != "--smoke-test"]
+
     config = ConfigManager()
-    app = QApplication(sys.argv)
+    app = QApplication(qt_args)
     app.setApplicationName("ReForge")
     app.setOrganizationName("ReForge")
     app.setStyle("Fusion")
@@ -39,6 +43,11 @@ def main() -> int:
         main_window = MainWindow(config)
         main_window.show()
         loader.initialize_all(main_window)
+
+        if smoke_test:
+            log.info("Smoke-test mode enabled; scheduling clean shutdown")
+            QTimer.singleShot(750, app.quit)
+
         exit_code = app.exec()
         return exit_code
     finally:
