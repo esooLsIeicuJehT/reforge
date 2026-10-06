@@ -117,7 +117,7 @@ class Loader:
         """Shut down live plugins without allowing one failure to stop the rest."""
         for record in reversed(self.records):
             plugin = record.instance
-            if plugin is None:
+            if not record.enabled or plugin is None:
                 continue
 
             try:
