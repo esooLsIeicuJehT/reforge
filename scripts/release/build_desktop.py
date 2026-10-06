@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import configparser
+import importlib.metadata
 import json
 import os
 import shutil
@@ -31,9 +32,7 @@ def _configure_spec(spec_path: Path) -> None:
     parser["app"]["title"] = "ReForge"
     parser["app"]["project_dir"] = str(ROOT)
     parser["app"]["input_file"] = str(ROOT / "main.py")
-    # pyside6-deploy's project_file is a Qt for Python project descriptor,
-    # not Python packaging metadata. ReForge does not use a pyside6-project
-    # descriptor, so leave this empty and deploy directly from main.py.
+    # project_file is a Qt for Python project descriptor, not pyproject.toml.
     parser["app"]["project_file"] = ""
     parser["app"]["exec_directory"] = str(BUILD_ROOT)
 
@@ -45,13 +44,14 @@ def _configure_spec(spec_path: Path) -> None:
 
     parser["qt"]["modules"] = "Core,Gui,Widgets"
 
+    # The trusted registry imports each production plugin statically. Keeping
+    # these package boundaries explicit makes the compiler input deterministic.
     extra_args = [
         "--quiet",
         "--noinclude-qt-translations=True",
         "--include-package=plugins",
         "--include-package=core",
         "--include-package=gui",
-        "--include-data-files=gui/dark_theme.qss=gui/dark_theme.qss",
     ]
     if sys.platform == "darwin":
         extra_args.append("--macos-create-app-bundle")
@@ -109,16 +109,22 @@ def main() -> int:
         raise RuntimeError(f"No deployed artifact found in {BUILD_ROOT}")
 
     metadata = {
+        "application": "ReForge",
+        "application_version": importlib.metadata.version("reforge-toolkit"),
         "platform": sys.platform,
         "python": sys.version,
-        "pyside": "6.11.2",
+        "pyside": importlib.metadata.version("PySide6"),
         "nuitka": "4.1.1",
         "outputs": outputs,
+        "source_commit": os.getenv("GITHUB_SHA", "local"),
         "source_date_epoch": os.getenv("SOURCE_DATE_EPOCH", ""),
     }
     metadata_path = ROOT / "build" / "release-build.json"
-    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(metadata, indent=2))
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(metadata, indent=2, sort_keys=True))
     return 0
 
 
