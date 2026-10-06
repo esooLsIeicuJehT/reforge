@@ -29,6 +29,8 @@ jobs:
             label: linux-x86_64
           - os: windows-latest
             label: windows-x86_64
+          - os: macos-15
+            label: macos-arm64
           - os: macos-15-intel
             label: macos-x86_64
     runs-on: ${{ matrix.os }}
@@ -56,7 +58,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libegl1 libgl1 libxkbcommon-x11-0
+          sudo apt-get install -y build-essential patchelf libegl1 libgl1 libxkbcommon-x11-0
 
       - name: Install pinned release environment
         run: |
@@ -111,6 +113,8 @@ jobs:
             label: linux-x86_64
           - os: windows-latest
             label: windows-x86_64
+          - os: macos-15
+            label: macos-arm64
           - os: macos-15-intel
             label: macos-x86_64
     runs-on: ${{ matrix.os }}
