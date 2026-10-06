@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BUILD_ROOT = ROOT / "build" / "native"
+DEPLOY_ROOT = ROOT / "deployment"
+LEGACY_BUILD_ROOT = ROOT / "build" / "native"
 GENERATED_SPEC = ROOT / "pysidedeploy.spec"
 WORK_SPEC = ROOT / "build" / "pysidedeploy.release.spec"
 
@@ -34,9 +35,12 @@ def _configure_spec(spec_path: Path) -> None:
     parser["app"]["input_file"] = str(ROOT / "main.py")
     # project_file is a Qt for Python project descriptor, not pyproject.toml.
     parser["app"]["project_file"] = ""
-    parser["app"]["exec_directory"] = str(BUILD_ROOT)
 
-    deploy_packages = ["nuitka==4.1.1", "ordered_set", "zstandard"]
+    # pyside6-deploy manages its build output under ROOT/deployment. The
+    # release workflow preinstalls the exact compiler toolchain versions, and
+    # these names tell deploy which helpers it may require without making the
+    # release metadata claim a version different from what is actually used.
+    deploy_packages = ["nuitka", "ordered_set", "zstandard"]
     if sys.platform.startswith("linux"):
         deploy_packages.append("patchelf")
     parser["python"]["python_path"] = sys.executable
@@ -48,7 +52,7 @@ def _configure_spec(spec_path: Path) -> None:
     # these package boundaries explicit makes the compiler input deterministic.
     extra_args = [
         "--quiet",
-        "--noinclude-qt-translations=True",
+        "--noinclude-qt-translations",
         "--include-package=plugins",
         "--include-package=core",
         "--include-package=gui",
@@ -65,12 +69,13 @@ def _configure_spec(spec_path: Path) -> None:
 
 
 def _discover_outputs() -> list[str]:
-    if not BUILD_ROOT.exists():
-        return []
-    outputs = []
-    for path in BUILD_ROOT.iterdir():
-        if path.name.endswith(".dist") or path.suffix.lower() in {".app", ".exe", ".bin"}:
-            outputs.append(str(path.resolve()))
+    outputs: set[str] = set()
+    for root in (DEPLOY_ROOT, LEGACY_BUILD_ROOT):
+        if not root.exists():
+            continue
+        for path in root.iterdir():
+            if path.name.endswith(".dist") or path.suffix.lower() in {".app", ".exe", ".bin"}:
+                outputs.add(str(path.resolve()))
     return sorted(outputs)
 
 
@@ -79,7 +84,8 @@ def main() -> int:
     if not deploy:
         raise SystemExit("pyside6-deploy is not available on PATH")
 
-    BUILD_ROOT.mkdir(parents=True, exist_ok=True)
+    DEPLOY_ROOT.mkdir(parents=True, exist_ok=True)
+    WORK_SPEC.parent.mkdir(parents=True, exist_ok=True)
     original_spec = GENERATED_SPEC.read_bytes() if GENERATED_SPEC.exists() else None
 
     try:
@@ -106,7 +112,9 @@ def main() -> int:
 
     outputs = _discover_outputs()
     if not outputs:
-        raise RuntimeError(f"No deployed artifact found in {BUILD_ROOT}")
+        raise RuntimeError(
+            f"No deployed artifact found in {DEPLOY_ROOT} or {LEGACY_BUILD_ROOT}"
+        )
 
     metadata = {
         "application": "ReForge",
@@ -114,7 +122,7 @@ def main() -> int:
         "platform": sys.platform,
         "python": sys.version,
         "pyside": importlib.metadata.version("PySide6"),
-        "nuitka": "4.1.1",
+        "nuitka": importlib.metadata.version("Nuitka"),
         "outputs": outputs,
         "source_commit": os.getenv("GITHUB_SHA", "local"),
         "source_date_epoch": os.getenv("SOURCE_DATE_EPOCH", ""),
