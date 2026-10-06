@@ -49,6 +49,35 @@ def _find_deployed_output() -> Path:
     )
 
 
+def _distribution_license_metadata(dist: metadata.Distribution) -> str:
+    """Serialize license evidence carried by an installed Python distribution."""
+    message = dist.metadata
+    fields = (
+        "Name",
+        "Version",
+        "License",
+        "License-Expression",
+        "Home-page",
+        "Project-URL",
+    )
+    lines: list[str] = []
+    for field in fields:
+        values = message.get_all(field) or []
+        for value in values:
+            if value:
+                lines.append(f"{field}: {value}")
+
+    classifiers = [
+        value
+        for value in (message.get_all("Classifier") or [])
+        if "License ::" in value
+    ]
+    for classifier in classifiers:
+        lines.append(f"Classifier: {classifier}")
+
+    return "\n".join(lines) + "\n"
+
+
 def _copy_release_material(stage: Path) -> None:
     for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
         source = ROOT / name
@@ -75,14 +104,27 @@ def _copy_release_material(stage: Path) -> None:
     )
 
     license_root = stage / "licenses" / "qt-for-python"
-    copied = 0
+    recorded_distributions = 0
+    copied_files = 0
     for dist_name in ("PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6"):
         try:
             dist = metadata.distribution(dist_name)
         except metadata.PackageNotFoundError:
             continue
 
-        target_root = license_root / dist_name
+        recorded_distributions += 1
+        canonical_name = dist.metadata.get("Name") or dist_name
+        target_root = license_root / canonical_name
+        target_root.mkdir(parents=True, exist_ok=True)
+
+        # Some current Qt for Python wheels expose their licensing terms in
+        # wheel METADATA without shipping a standalone LICENSE file. Preserve
+        # that exact installed-distribution evidence in every release candidate.
+        (target_root / "DISTRIBUTION-LICENSE-METADATA.txt").write_text(
+            _distribution_license_metadata(dist),
+            encoding="utf-8",
+        )
+
         for entry in dist.files or []:
             parts = [part.lower() for part in entry.parts]
             filename = entry.name.lower()
@@ -101,10 +143,25 @@ def _copy_release_material(stage: Path) -> None:
             destination = target_root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
-            copied += 1
+            copied_files += 1
 
-    if copied == 0:
-        raise RuntimeError("No Qt for Python license material was found in installed distributions")
+    if recorded_distributions == 0:
+        raise RuntimeError("No installed Qt for Python distributions were found")
+
+    summary = {
+        "distributions_recorded": recorded_distributions,
+        "standalone_license_files_copied": copied_files,
+        "note": (
+            "Some Qt for Python wheels may carry license declarations only in "
+            "distribution METADATA. The exact release licensing path and any "
+            "additional notice/text obligations remain governed by the release checklist."
+        ),
+    }
+    license_root.mkdir(parents=True, exist_ok=True)
+    (license_root / "LICENSE-MATERIAL-SUMMARY.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_dependency_metadata(stage: Path) -> None:
