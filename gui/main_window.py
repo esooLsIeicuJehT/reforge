@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QByteArray, QObject, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QCloseEvent, QFont
-from PyQt6.QtWidgets import QDockWidget, QLabel, QMainWindow, QStatusBar, QTextEdit
+from PySide6.QtCore import QByteArray, QObject, Qt, Signal
+from PySide6.QtGui import QAction, QCloseEvent, QFont
+from PySide6.QtWidgets import QDockWidget, QLabel, QMainWindow, QStatusBar, QTextEdit
 
 from core.config_manager import ConfigManager
 from core.event_bus import bus
@@ -15,7 +15,7 @@ log = get_logger("gui.main_window")
 
 
 class _LogEmitter(QObject):
-    message = pyqtSignal(str)
+    message = Signal(str)
 
 
 class _GuiLogHandler(logging.Handler):
