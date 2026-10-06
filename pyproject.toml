@@ -17,6 +17,7 @@ frida = [
   "frida-tools>=14.6.1",
 ]
 dev = [
+  "build>=1.2",
   "pytest>=8.0",
 ]
 
