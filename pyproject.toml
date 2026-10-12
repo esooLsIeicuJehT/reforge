@@ -31,9 +31,6 @@ py-modules = ["main"]
 where = ["."]
 include = ["core*", "gui*", "plugins*"]
 
-[tool.setuptools.package-data]
-gui = ["*.qss"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

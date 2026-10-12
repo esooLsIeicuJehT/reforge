@@ -1,0 +1,155 @@
+name: Native release artifacts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "main.py"
+      - "core/**"
+      - "gui/**"
+      - "plugins/**"
+      - "pyproject.toml"
+      - "scripts/release/**"
+      - ".github/workflows/release-artifacts.yml"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          - os: windows-latest
+            label: windows-x86_64
+          - os: macos-15
+            label: macos-arm64
+          - os: macos-15-intel
+            label: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      SOURCE_DATE_EPOCH: "1704067200"
+      QT_QPA_PLATFORM: offscreen
+      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libegl1 libgl1 libxkbcommon-x11-0
+
+      - name: Install pinned release environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "PySide6==6.11.2" "Nuitka==4.1.1" "ordered-set==4.1.0" "zstandard==0.25.0" "cyclonedx-bom==7.5.0"
+          python -m pip install -e . --no-deps
+          python -m pip check
+          python -m nuitka --version
+
+      - name: Install Linux deploy helper
+        if: runner.os == 'Linux'
+        run: python -m pip install "patchelf==0.19.1.0"
+
+      - name: Build native artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VS_PATH=%%i
+          call "%VS_PATH%\Common7\Tools\VsDevCmd.bat" -arch=x64
+          python scripts\release\build_desktop.py
+
+      - name: Build native artifact
+        if: runner.os != 'Windows'
+        run: python scripts/release/build_desktop.py
+
+      - name: Optional Windows signing
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_BASE64 != '' && env.WINDOWS_CERTIFICATE_PASSWORD != ''
+        run: python scripts/release/sign_native.py
+
+      - name: Optional macOS signing
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_BASE64 != '' && env.APPLE_CERTIFICATE_PASSWORD != '' && env.APPLE_SIGNING_IDENTITY != ''
+        run: python scripts/release/sign_native.py
+
+      - name: Stage legal files, SBOM, checksums, and archive
+        id: package
+        run: python scripts/release/package_artifact.py
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: reforge-${{ matrix.label }}
+          path: |
+            release/*.zip
+            release/*.tar.gz
+            release/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  smoke:
+    name: Smoke ${{ matrix.label }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          - os: windows-latest
+            label: windows-x86_64
+          - os: macos-15
+            label: macos-arm64
+          - os: macos-15-intel
+            label: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout smoke scripts
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0
+
+      - name: Download release candidate
+        uses: actions/download-artifact@v5
+        with:
+          name: reforge-${{ matrix.label }}
+          path: downloaded
+
+      - name: Verify checksum and extract
+        run: python scripts/release/verify_extract.py downloaded smoke-extract
+
+      - name: Launch packaged application smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python scripts/release/smoke_artifact.py smoke-extract

@@ -1,3 +1,10 @@
+"""Built-in ReForge desktop theme.
+
+Keeping the stylesheet in Python removes a loose runtime file dependency from
+standalone desktop artifacts.
+"""
+
+DARK_THEME = """\
 QMainWindow { background-color: #1e1e1e; }
 QMenuBar { background-color: #2d2d30; color: #d4d4d4; }
 QMenuBar::item:selected { background: #3e3e42; }
@@ -15,3 +22,4 @@ QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
 QLineEdit { background-color: #2d2d30; color: #d4d4d4; border: 1px solid #3e3e42; padding: 2px; }
 QTreeView, QListView { background-color: #2d2d30; color: #d4d4d4; }
 QTreeView::item:hover, QListView::item:hover { background: #094771; }
+"""

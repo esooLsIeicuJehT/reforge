@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -10,13 +9,10 @@ from core.loader import Loader
 from gui.main_window import MainWindow
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
 def test_supported_plugins_initialize_offscreen(tmp_path):
     app = QApplication.instance() or QApplication([])
     config = ConfigManager(config_dir=tmp_path / "config")
-    loader = Loader(plugin_dir=PROJECT_ROOT / "plugins")
+    loader = Loader()
 
     records = loader.discover_and_load()
     failures = [record for record in records if not record.enabled]
